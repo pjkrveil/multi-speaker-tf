@@ -263,7 +263,7 @@ def train(log_dir, config):
 						test_model.linear_outputs[:num_test],
 						test_model.alignments[:num_test],
 					]
-					free_dict = {
+					feed_dict = {
 							**model.get_dummy_feed_dict(),
 							**test_model.get_dummy_feed_dict()
 					}
