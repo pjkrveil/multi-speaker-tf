@@ -111,8 +111,211 @@ def train(log_dir, config):
 	commit = get_git_commit() if config.git else 'None'
 	checkpoint_path = os.path.join(log_dir, 'model.ckpt')
 
+	log(' [*] git recv-parse HEAD:\n%s' % get_git_revision_hash())
+	log('=' * 50)
+	log(' [*] dit diff:\n%s' % get_git_diff())
+	log('=' * 50)
+	log(' [*] Checkpoint path: %s' % checkpoint_path)
+	log(' [*] Loading training data from: %s' % data_dirs)
+	log(' [*] Using model: %s' % config.model_dir)
+	log(hparams_debug_string())
 
 
+	# Set Up DataFeeder
+	coord = tf.train.Coordinator()
+	with tf.variable_scope('datafeeder') as scope:
+		train_feeder = DataFeeder(
+			coord, data_dirs, hparams, config, 32,
+			data_type='train', batch_size=hparams.batch_size)
+		train_feeder = DataFeeder(
+			coord, data_dirs, hparams, config, 8,
+			data_type='test', batch_size=config.num_test)
+
+
+	# Set up model:
+	is_randomly_initialized = config.initialize_path is None
+	global_step = tf.Variable(0, name='global_step', trainable=False)
+
+	with tf.variable_scope('model') as scope:
+		model = create_model(hparams)
+		model.initialize(
+			train_feeder.inputs, train_feeder.input_lengths,
+			num_speakers, train_feeder.speaker_id,
+			train_feeder.mel_targets, train_feeder.linear_targets,
+			train_feeder.loss_coeff,
+			is_randomly_initialized=is_randomly_initialized)
+
+		model.add_loss()
+		model.add_optimizer(global_step)
+		train_stats = add_stats(model, scope_name='stats') # legacy
+
+	with tf.variable_scope('model', reuse=True) as scope:
+		test_model = create_model(hparams)
+		test_model.initialize(
+			test_feeder.inputs, test_feeder.input_lengths,
+			num_speakers, test_feeder.speaker_id,
+			test_feeder.mel_targets, test_feeder.linear_targets,
+			test_feeder.loss_coeff, rnn_decoder_test_mode=True,
+			is_randomly_initialized=is_randomly_initialized)
+		test_model.add_loss()
+
+
+	test_stats = add_stats(test_model, model, scope_name='test')
+	test_stats = tf.summary.merge([test_stats, train_stats])
+
+	#Bookkeeping:
+	step = 0
+	time_window	= ValueWindow(100)
+	loss_window = ValueWindow(100)
+	saver = tf.train.Saver(max_to_keep=5, keep_checkpoint_every_n_hours=2)
+
+	sess_config = tf.ConfigProto(
+		log_device_placement=False,
+		allow_soft_placement=True)
+	sess_confg.gpu_options.allow_growth=True
+
+	# Train part
+	with tf.Session() as sess:
+		try:
+			summary_writer = tf.summary.FileWriter(log_dir, sess.graph)
+			sess.run(tf.global_variables_initializer())
+
+			if config.load_path:
+				# Restore from a checkpoint if the user requested it.
+				restore_path = get_most_recent_checkpoint(config.model_dir)
+				saver.restore(sess, restore_path)
+				log('Resuming from checkpoint: %s at commit: %s' % (restore_path, commit), slack=True)
+			elif config.initialize_path:
+				restore_path = get_most_recent_checkpoint(config.initialize)
+				saver.restore(sess, restore_path)
+				log('Initialize from checkpoint: %s at commit: %s' % (restore_path, commit), slack=True)
+
+				zero_step_assign = tf.assign(global_step, 0)
+				sess.run(zero_step_assign)
+
+				start_step = sess.run(global_step)
+				log('='*50)
+				log(' [*] Global step is reset to {}'. \
+					format(start_step))
+				log('='*50)
+			else:
+				log('Starting new training run at commit: %s' % commit, slack=True)
+
+			start_step = sess.run(global_step)
+
+			train_feeder.start_in_session(sess, start_step)
+			test_feeder.start_in_session(sess, start_step)
+
+			while not coord.should_stop():
+				start_time = time.time()
+				step, loss, opt = sess.run(
+					[global_step, model.loss_without_coeff, model.optimize],
+					feed_dict=model.get_dummy_feed_dict())
+
+				time_window.append(time.time() - start_time)
+				loss_window.append(loss)
+
+				message = 'Step %-7d [%.03f sec/step, loss=%.05f, avg_loss=%.05f]' %(
+					step, time_window.average, loss, loss_window.average)
+				log(message, slack=(step % config.checkpoint_interval == 0))
+
+				if loss > 100 or math.isnan(loss):
+					log('Loss exploded to %.05f at step %d!' % (loss, step), slack=True)
+					raise Exception('Loss Exploded')
+
+				if step % config.summary_interval == 0:
+					log('Writing summary at step: %d' % step)
+
+					feed_dict = {
+							**model.get_dummy_feed_dict(),
+							**test_model.get_dummy_feed_dict()
+					}
+					summary_writer.add_summary(sess.run(
+						test_stats, feed_dict=feed_dict), step)
+
+
+				if step % config.checkpoint_interval == 0:
+					log('Saving checkpoint to: %s-%d' % (checkpoint_path, step))
+					saver.save(sess, checkpoint_path, global_step=step)
+
+				if step % config.test_interval == 0:
+					log('Saving audio and alignments...')
+					num_test = config.num_test
+
+					fetches = [
+						model.inputs[:num_test],
+						model.linear_outputs[:num_test]
+						model.alignments[:num_test],
+						test_model.inputs[:num_test],
+						test_model.linear_outputs[:num_test],
+						test_model.alignments[:num_test],
+					]
+					free_dict = {
+							**model.get_dummy_feed_dict(),
+							**test_model.get_dummy_feed_dict()
+					}
+
+					sequences, spectrograms, alignments, \
+						test_sequences, test_spectrograms, test_alignments = \
+							sess.run(fetches, feed_dict=feed_dict)
+
+					save_and_plot(sequences[:1], spectrograms[:1], alignments[:1],
+						log_dir, step, loss, "train")
+					save_and_plot(test_sequences, test_spectrograms, test_alignments,
+						log_dir, step, loss, "test")
+
+
+		except Exception as e:
+			log('Exiting due to exception: %s' % e, slack=True)
+			traceback.print_exc()
+			coord.request_stop(e)
+
+
+def main():
+	parser = argparse.ArgumentParser()
+
+	parser.add_argument('--log_dir', default='logs')
+	parser.add_argument('--data_paths', default='datasets/kr_example')
+	parser.add_argument('--load_path', default=None)
+	parser.add_argument('--initialize_path', default=None)
+
+	parser.add_argument('--num_test_per_speaker', type=int, default=2)
+	parser.add_argument('--random_seed', type=int, default=123)
+	parser.add_argument('--summary_interval', type=int, default=100)
+	parser.add_argument('--test_interval', type=int, default=500)
+	parser.add_argument('--checkpoint_interval', type=int, default=1000)
+	parser.add_argument('--skip_path_filter',
+		type=str2bool, default=False, help='Use only for debugging')
+
+	parser.add_argument('--slack_url',
+		help='Slack webhook URL to get periodic reports.')
+	parser.add_argument('--git', action='store_true',
+		help='If set, verify that the client is clean.')
+
+	config = parser.parse_args()
+	config.data_paths = config.data_paths.aplit(",")
+	setattr(hparams, "num_sepakers", len(config.data_paths))
+
+	prepare_dirs(config, hparams)
+
+	log_path = os.path.join(config.model_dir, 'train.log')
+	infolog.init(log_path, config.model_dir, config.slack_url)
+
+	tf.set_random_seed(config.random_seed)
+
+	if any("krbook" not in data_path for data_path in config.data_paths) and \
+			hparams.sample_rate != 20000:
+		warning("Detect non-krbook dataset. Set sampling rate from {} to 20000.".\
+			format(hparams.sample_rate))
+
+	if config.load_path is not None and config.initialize_path is not None:
+		raise Excpetion(" [!] Only one of load_path and initialize_path should be set")
+
+	train(config.model_dir, config)
+
+
+if __name__ == '__main__':
+	main()
 
 
 
