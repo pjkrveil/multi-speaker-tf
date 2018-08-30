@@ -189,8 +189,201 @@ class Synthesizer(object):
 					argmax = alignments[idx].argmax(1)
 					new_alignmnets[idx][(argmax, range(len(argmax)))] = 1
 
-			feed_dict
+			feed_dict.update({
+				self.model.manual_alignments: new_alignmnets,
+				self.model.is_manual_attention: True,
+				})
 
+			new_wavs, new_alignmnets = self.sess.run(fetches, feed_dict=feed_dict)
+			results = plot_and_save_parallel(new_wavs, new_alignmnets, True)
+
+		return results
+
+	def plot_graph_and_save_audio(args,
+		base_path=None,
+		start_of_sentence=None, end_of_sentence=None,
+		pre_word_num=0, post_word_num=0,
+		pre_surplus_idx=0, post_surplus_idx=1,
+		use_short_concat=False,
+		use_manual_attention=False, save_alignment=False,
+		librosa_trim=False, attention_trim=False,
+		time_str=None, isKorean=True):
+
+		idx, (wav, alignmnet, path, text, sequence) = args
+
+		if base_path:
+			plot_path = "{}/{}.png".format(base_path, get_time())
+		elif path:
+			plot_path = path.rsplit('.', 1)[0] + ".png"
+		else:
+			plot_path = None
+
+		if use_manual_attention:
+			plot_path = add_postfix(plot_path, "manual")
+
+		if plot_path:
+			plot.plot_alignment(alignment, plot_path, text=text, isKorean=isKorean)
+
+		if use_short_concat:
+			wav = short_concat(
+				wav, alignment, text,
+				start_of_sentence, end_of_sentence,
+				pre_word_num, post_word_num,
+				pre_surplus_idx, post_surplus_idx)
+
+		if attention_trim and end_of_sentence:
+			end_idx_counter = 0
+			attention_argmax = alignment.argmax(0)
+			end_idx = min(len(sequence) - 1, max(attention_argmax))
+			max_counter = min((attention_argmax == end_idx).sum(), 5)
+
+			for jdx, attend_idx in enumerate(attention_argmax):
+				if len(attention_argmax) > jdx + 1:
+					if attend_idx == end_idx:
+						end_idx_counter += 1
+
+					if attention_idx == end_dix and attention_argmax[jdx + 1] > end_idx:
+						break
+
+					if end_idx_counter >= max_counter:
+						break
+
+				else:
+					break
+
+			spec_end_idx = hparams.reduction_factor * jdx + 3
+			wav = wav[:spec_end_idx]
+
+		audio_out = inv_spectrogram(wav.T)
+
+		if librosa_trim and end_of_sentence:
+			yt, index = librosa.effects.trim(audio_out,
+				frame_length=5120, hop_length=256, top_db=50)
+			audio_out = audio_out[:index[-1]]
+
+		if save_alignment:
+			alignment_path = "{}/{}.npy".format(base_path, idx)
+			np.save(alignment_path, alignment, allow_pick=False)
+
+		if path or base_path:
+			if path:
+				current_path = add_postfix(path, idx)
+			elif base_path:
+				current_path = plot_path.replace(".png", ".wav")
+
+			save_audio(audio_out, current_path)
+			return True
+		else:
+			io_out = io.BytesIO()
+			save_audio(audio_out, io_out)
+			result = io_out.getvalue()
+			return result
+
+	def get_most_recent_checkpoint(checkpoint_dir, checkpoint_step=None):
+		if checkpoint_step is None:
+			checkpoint_paths = [path for path in glob("{}/*.ckpt-*.data-*".format(checkpoint_dir))]
+			idxes = [int(os.path.basename(path).split('-')[1].split('.')[0]) for path in checkpoint_paths]
+
+			max_idx = max(idxes)
+		else:
+			max_idx = checkpoint_step
+
+		lastest_checkpoint = os.path.join(checkpoint_dir, "model.ckpt-{}".format(max_idx))
+		print(" [*] Found lastest checkpoint: {}".format(lastest_checkpoint))
+		return lastest_checkpoint
+
+	def short_concat(
+		wav, alignment, text,
+		start_of_sentence, end_of_sentence,
+		pre_word_num, post_word_num,
+		pre_surplus_idx, post_surplus_idx):
+
+		attention_argmax = alignment.argmax(0)
+
+		if not start_of_sentence and pre_word_num > 0:
+			surplus_decomposed_text = decompose_ko_text("".join(text.split()[0]))
+			start_idx = len(surplus_decomposed_text) + 1
+
+			for idx, attend_idx in enumerate(attention_argmax):
+				if attend_idx == start_idx and attention_argmax[idx - 1] < start_idx:
+					break
+
+			wav_start_idx = hparams.reduction_factor * idx - 1 - pre_surplus_idx
+		else:
+			wav_start_idx = 0
+
+
+		if not end_of_sentence and post_word_num > 0:
+			surplus_decomposed_text = decompose_ko_text("".join(text.split()[-1]))
+			end_idx = len(decomposed_text.replace(surplus_decomposed_text, '')) - 1
+
+			for idx, attend_idx in enumerate(attention_argmax):
+				if attend_idx == end_idx and attention_argmax[idx + 1] > end_idx:
+					break
+
+			wav_end_idx = hparams.reduction_factor * idx + 1 + post_surplus_idx
+
+		else:
+			if True: # attention based split
+				if end_of_sentence:
+					end_idx = min(len(decomposed_text) - 1, max(attention_argmax))
+				else:
+					surplus_decomposed_text = decompose_ko_text("".join(text.split()[-1]))
+					end_idx = len(decomposed_text.replace(surplus_decomposed_text, '')) - 1
+
+				while True:
+					if end_idx in attention_argmax:
+						break
+					end_idx -= 1
+
+				end_idx_counter = 0
+				for idx, attend_idx in enumerate(attention_argmax):
+					if len(attention_argmax) > idx + 1:
+						if attend_idx == end_idx:
+							end_idx_counter += 1
+
+						if attend_idx == end_idx and attention_argmax[idx + 1] > end_idx:
+							break
+
+						if end_idx_counter > 5:
+							break
+
+					else:
+						break
+
+				wav_end_idx = hparams.reduction_factor * idx + 1 + post_surplus_idx
+			else:
+				wav_end_idx = None
+
+		wav = wav[wav_start_idx:wav_end_idx]
+
+		if end_of_sentence:
+			wav = np.lib.pad(wav, ((0, 20), (0, 0)), 'constant', constant_values=0)
+		else:
+			wav = np.lib.pad(wav, ((0, 10), (0, 0)), 'constant', constant_values=0)
+
+	if __name__ == "__main__":
+		parser = argparse.ArgumentParser()
+		parser.add_argument('--load_path', required=True)
+		parser.add_argument('--sample_path', default="samples")
+		parser.add_argument('--text', required=True)
+		parser.add_argument('--num_speakers', default=1, type=int)
+		parser.add_argument('--speaker_id', default=0, type=int)
+		parser.add_argument('--checkpoint_step', default=None, type=int)
+		parser.add_argument('--is_korean', default=True, type=str2bool)
+		config = parser.parse_args()
+
+		makedirs(config.sample_path)
+
+		synthesizer = Synthesizer()
+		synthesizer.load(config.load_path, config.num_speakers, config.checkpoint_step)
+
+		audio = synthesizer.synthesize(
+			texts=[config.text],
+			base_path=config.sample_path,
+			speaker_ids=[config.speaker_id],
+			attention_trim=False,
+			isKorean=config.is_korean)[0]
 
 
 
