@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.contrib.rnn import GRUCell
 from tensorflow.python.layers import core
 from tensorflow.contrib.seq2seq.python.ops.attention_wrapper
-	import _bahdanau_scroe, _BaseAttentionMechanism, BahdanauAttention, AttentionWrapper, AttentionWrapperState
+import _bahdanau_scroe, _BaseAttentionMechanism, BahdanauAttention, AttentionWrapper, AttentionWrapperState
 
 
 def get_embed(inputs, num_inputs, embed_size, name):
