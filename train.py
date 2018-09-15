@@ -57,7 +57,7 @@ def add_stats(model, model2=None, scope=name='train'):
 				tf.summary.scalar('loss_linear', model.linear_loss),
 				tf.summary.scalar('loss', model.loss_without_coeff),
 		]
-
+ 
 		if scope_name == 'train':
 			gradient_norms = [tf.norm(grad) for grad in model.gradients if grad is not None]
 
