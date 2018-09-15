@@ -1,8 +1,7 @@
 import tensorflow as tf
 from tensorflow.contrib.rnn import GRUCell
 from tensorflow.python.layers import core
-from tensorflow.contrib.seq2seq.python.ops.attention_wrapper
-import _bahdanau_scroe, _BaseAttentionMechanism, BahdanauAttention, AttentionWrapper, AttentionWrapperState
+from tensorflow.contrib.seq2seq.python.ops.attention_wrapper import _bahdanau_scroe, _BaseAttentionMechanism, BahdanauAttention, AttentionWrapper, AttentionWrapperState
 
 
 def get_embed(inputs, num_inputs, embed_size, name):
@@ -10,7 +9,7 @@ def get_embed(inputs, num_inputs, embed_size, name):
 		name, [num_inputs, embed_size], dtype=tf.float32,
 		initializer=tf.truncated_normal_initializer(stddev=0.1))
 	return tf.nn.embedding_lookup(embed_table, inputs)
-
+	
 
 def prenet(inputs, is_training, layer_sizes, drop_prob, scope=None):
 	x = inputs

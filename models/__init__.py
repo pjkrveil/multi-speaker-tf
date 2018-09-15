@@ -14,6 +14,6 @@ def get_most_recent_checkpoint(checkpoint_dir):
 
 	# Test code
 	# latest_checkpoint = checkpoint_paths[0]
-
+	
 	print(" [*] Found lastest checkpoint: {}".format(lastest_checkpoint))
 	return lastest_checkpoint
